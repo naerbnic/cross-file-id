@@ -5,14 +5,51 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::path::Path;
 
+use crate::AsRawOsFile;
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FileIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+impl FileIdentity {
+    pub fn from_os_file(f: RawOsFile) -> io::Result<FileIdentity> {
+        // SAFETY: Although we create a File from the file descriptor, we use
+        // into_raw_fd() to avoid the drop closing the file descriptor when
+        // the File goes out of scope.
+        let metadata = unsafe {
+            let temp_file = File::from_raw_fd(f.0.as_raw_fd());
+            // Do not use a '?' here since that would cause the temp_file to be
+            // dropped and the file descriptor closed.
+            let result = temp_file.metadata();
+            // Prevent the File from closing the file descriptor by consuming it.
+            let _ = temp_file.into_raw_fd();
+            result
+        }?;
+        Ok(FileIdentity::from_metadata(&metadata))
+    }
+
+    pub fn from_metadata(md: &std::fs::Metadata) -> FileIdentity {
+        FileIdentity { dev: md.dev(), ino: md.ino() }
+    }
+
+    pub fn dev(&self) -> u64 {
+        self.dev
+    }
+
+    pub fn ino(&self) -> u64 {
+        self.ino
+    }
+}
+
 #[derive(Debug)]
 pub struct Handle {
     file: Option<File>,
     // If is_std is true, then we don't drop the corresponding File since it
     // will close the handle.
     is_std: bool,
-    dev: u64,
-    ino: u64,
+    id: FileIdentity,
 }
 
 impl Drop for Handle {
@@ -20,6 +57,7 @@ impl Drop for Handle {
         if self.is_std {
             // unwrap() will not panic. Since we were able to open an
             // std stream successfully, then `file` is guaranteed to be Some()
+            #[expect(unused_must_use)]
             self.file.take().unwrap().into_raw_fd();
         }
     }
@@ -29,7 +67,7 @@ impl Eq for Handle {}
 
 impl PartialEq for Handle {
     fn eq(&self, other: &Handle) -> bool {
-        (self.dev, self.ino) == (other.dev, other.ino)
+        self.id == other.id
     }
 }
 
@@ -37,7 +75,7 @@ impl AsRawFd for crate::Handle {
     fn as_raw_fd(&self) -> RawFd {
         // unwrap() will not panic. Since we were able to open the
         // file successfully, then `file` is guaranteed to be Some()
-        self.0.file.as_ref().take().unwrap().as_raw_fd()
+        self.0.file.as_ref().unwrap().as_raw_fd()
     }
 }
 
@@ -51,8 +89,7 @@ impl IntoRawFd for crate::Handle {
 
 impl Hash for Handle {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.dev.hash(state);
-        self.ino.hash(state);
+        self.id.hash(state);
     }
 }
 
@@ -66,8 +103,7 @@ impl Handle {
         Ok(Handle {
             file: Some(file),
             is_std: false,
-            dev: md.dev(),
-            ino: md.ino(),
+            id: FileIdentity::from_metadata(&md),
         })
     }
 
@@ -93,20 +129,40 @@ impl Handle {
     pub fn as_file(&self) -> &File {
         // unwrap() will not panic. Since we were able to open the
         // file successfully, then `file` is guaranteed to be Some()
-        self.file.as_ref().take().unwrap()
+        self.file.as_ref().unwrap()
     }
 
     pub fn as_file_mut(&mut self) -> &mut File {
         // unwrap() will not panic. Since we were able to open the
         // file successfully, then `file` is guaranteed to be Some()
-        self.file.as_mut().take().unwrap()
+        self.file.as_mut().unwrap()
+    }
+
+    pub fn id(&self) -> FileIdentity {
+        self.id
     }
 
     pub fn dev(&self) -> u64 {
-        self.dev
+        self.id.dev()
     }
 
     pub fn ino(&self) -> u64 {
-        self.ino
+        self.id.ino()
     }
 }
+
+/// A blanket implementation of AsRawOsFile for any types that implement
+/// AsRawFd.
+impl<T> AsRawOsFile for T
+where
+    T: AsRawFd,
+{
+    fn as_raw_os_file(&self) -> crate::RawOsFile<'_> {
+        crate::RawOsFile(RawOsFile(self.as_raw_fd(), std::marker::PhantomData))
+    }
+}
+
+pub struct RawOsFile<'a>(
+    std::os::unix::io::RawFd,
+    std::marker::PhantomData<&'a ()>,
+);

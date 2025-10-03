@@ -15,8 +15,9 @@ exclude = ["/.github"]
 edition = "2021"
 rust-version = "1.60"
 
-[target.'cfg(windows)'.dependencies.winapi-util]
-version = "0.1.1"
+[target.'cfg(windows)'.dependencies]
+winapi-util = { version = "0.1.1" }
+windows = { version = "0.52.0", features = ["Win32_Storage_FileSystem"]}
 
 [dev-dependencies]
 doc-comment = "0.3"

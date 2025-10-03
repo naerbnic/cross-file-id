@@ -4,7 +4,9 @@ use std::io;
 use std::os::windows::io::{AsRawHandle, IntoRawHandle, RawHandle};
 use std::path::Path;
 
-use winapi_util as winutil;
+use windows::Win32::Storage::FileSystem::{
+    FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+};
 
 // For correctness, it is critical that both file handles remain open while
 // their attributes are checked for equality. In particular, the file index
@@ -47,10 +49,51 @@ use winapi_util as winutil;
 // into the offending directory. As far as failure modes goes, this isn't
 // that bad.
 
+enum FileIdentityContents {
+    FileIdInfo(FILE_ID_INFO),
+    RawHandle(RawHandle),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct FileIdentity {
+    file_id_info: FileIdentityContents,
+}
+
+impl FileIdentity {
+    pub fn from_os_file(f: RawOsFile) -> io::Result<FileIdentity> {
+        let file_id_info = unsafe {
+            let mut info = FILE_ID_INFO::default();
+            let res = GetFileInformationByHandleEx(
+                f.0,
+                FileIdInfo,
+                &mut info as *mut _,
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            );
+            if res.as_bool() == false {
+                // We weren't able to get FILE_ID_INFO, so fall back to using
+                // the raw handle. This fits the documented behavior of
+                // returning a non-None FileIdentity on success, even if
+                return Err(io::Error::last_os_error());
+            }
+            info
+        };
+
+        Ok(FileIdentity { file_id_info })
+    }
+
+    pub fn volume(&self) -> u64 {
+        self.volume
+    }
+
+    pub fn index(&self) -> u64 {
+        self.index
+    }
+}
+
 #[derive(Debug)]
 pub struct Handle {
     kind: HandleKind,
-    key: Option<Key>,
+    key: Option<FileIdentity>,
 }
 
 #[derive(Debug)]
@@ -59,12 +102,6 @@ enum HandleKind {
     Owned(winutil::Handle),
     /// Used for stdio.
     Borrowed(winutil::HandleRef),
-}
-
-#[derive(Debug, Eq, PartialEq, Hash)]
-struct Key {
-    volume: u64,
-    index: u64,
 }
 
 impl Eq for Handle {}
@@ -137,7 +174,7 @@ impl Handle {
     ) -> Handle {
         Handle {
             kind: kind,
-            key: Some(Key {
+            key: Some(FileIdentity {
                 volume: info.volume_serial_number(),
                 index: info.file_index(),
             }),
@@ -170,3 +207,22 @@ impl Handle {
         }
     }
 }
+
+/// A blanket implementation of AsRawOsFile for any types that implement
+/// AsRawFd.
+impl<T> AsRawOsFile for T
+where
+    T: AsRawHandle,
+{
+    fn as_raw_os_file(&self) -> crate::RawOsFile<'_> {
+        crate::RawOsFile(RawOsFile(
+            self.as_raw_handle(),
+            std::marker::PhantomData,
+        ))
+    }
+}
+
+pub struct RawOsFile<'a>(
+    std::os::windows::io::RawHandle,
+    std::marker::PhantomData<&'a ()>,
+);

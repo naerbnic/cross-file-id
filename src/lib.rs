@@ -89,6 +89,39 @@ mod unknown;
 #[cfg(windows)]
 mod win;
 
+/// A cross-platform representation of a file's identity.
+///
+/// This represents an OS unique identifier for a file. Two files with the same
+/// identity are guaranteed to be the same file, but only while the files they
+/// refer to exist. On supported platforms, as long as the file is opened by
+/// this process, the identity will remain valid even if the file is deleted or
+/// renamed.
+///
+/// This does not hold onto any system resources, so it is safe to store and
+/// copy, but if the safety of the program is dependent on the identity
+/// remaining valid, then the file must be kept open by this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileIdentity(imp::FileIdentity);
+
+impl FileIdentity {
+    /// Extract a file identity from any type that implements the
+    /// [`AsRawOsFile`] trait, and thus the platform-specific traits
+    /// that provide access to raw OS representations of files.
+    ///
+    /// This does not take ownership of the OS file or alter its state.
+    pub fn from_file_like<F: AsRawOsFile>(file: &F) -> io::Result<Self> {
+        imp::FileIdentity::from_os_file(file.as_raw_os_file().0)
+            .map(FileIdentity)
+    }
+
+    /// Extract a file identity from a raw OS file descriptor or handle.
+    ///
+    /// This does not take ownership of the OS file or alter its state.
+    pub fn from_os_file(os_file: RawOsFile<'_>) -> io::Result<Self> {
+        imp::FileIdentity::from_os_file(os_file.0).map(FileIdentity)
+    }
+}
+
 /// A handle to a file that can be tested for equality with other handles.
 ///
 /// If two files are the same, then any two handles of those files will compare
@@ -331,6 +364,11 @@ impl Handle {
         self.0.as_file_mut()
     }
 
+    /// Returns the underlying file identity of this handle.
+    pub fn id(&self) -> FileIdentity {
+        FileIdentity(self.0.id())
+    }
+
     /// Return the underlying device number of this handle.
     ///
     /// Note that this only works on unix platforms.
@@ -346,6 +384,91 @@ impl Handle {
     pub fn ino(&self) -> u64 {
         self.0.ino()
     }
+}
+
+#[derive(Debug)]
+struct Handle2<F> {
+    file: F,
+    id: FileIdentity,
+}
+
+impl Handle2<File> {
+    pub fn from_path<P: AsRef<Path>>(p: P) -> io::Result<Handle2<File>> {
+        let file = File::open(p)?;
+        Handle2::new(file)
+    }
+
+    pub fn from_file(file: File) -> io::Result<Handle2<File>> {
+        Handle2::new(file)
+    }
+}
+
+impl<F> Handle2<F>
+where
+    F: AsRawOsFile,
+{
+    pub fn new(file: F) -> io::Result<Handle2<F>> {
+        let id = FileIdentity::from_file_like(&file)?;
+        Ok(Handle2 { file, id })
+    }
+
+    pub fn into_inner(self) -> F {
+        self.file
+    }
+
+    pub fn id(&self) -> FileIdentity {
+        self.id
+    }
+}
+
+impl<F> std::ops::Deref for Handle2<F> {
+    type Target = F;
+
+    fn deref(&self) -> &F {
+        &self.file
+    }
+}
+
+impl<F> std::ops::DerefMut for Handle2<F> {
+    fn deref_mut(&mut self) -> &mut F {
+        &mut self.file
+    }
+}
+
+impl<F> PartialEq for Handle2<F> {
+    fn eq(&self, other: &Handle2<F>) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<F> Eq for Handle2<F> {}
+
+impl<F> PartialOrd for Handle2<F> {
+    fn partial_cmp(&self, other: &Handle2<F>) -> Option<std::cmp::Ordering> {
+        self.id.partial_cmp(&other.id)
+    }
+}
+
+impl<F> std::hash::Hash for Handle2<F> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+/// A cross-platform wrapper around a platform specific file descriptor or
+/// handle.
+///
+/// This can be used to extract a [`FileIdentity`] from any type that
+/// implements the [`AsRawOsFile`] trait, which must include std::fs::File.
+pub struct RawOsFile<'a>(imp::RawOsFile<'a>);
+
+/// A cross-platform trait for extracting a raw file descriptor or handle.
+///
+/// Maps to the platform specific traits [`AsRawFd`] on Unix and
+/// [`AsRawHandle`] on Windows via a blanket implementation.
+pub trait AsRawOsFile {
+    /// Extracts the raw file descriptor or handle.
+    fn as_raw_os_file(&self) -> RawOsFile<'_>;
 }
 
 /// Returns true if the two file paths may correspond to the same file.
