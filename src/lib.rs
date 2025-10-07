@@ -158,6 +158,12 @@ impl<F> std::cmp::Ord for Handle<F> {
     }
 }
 
+impl<F> std::hash::Hash for Handle<F> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.identity.hash(state);
+    }
+}
+
 impl Handle<File> {
     /// Construct a handle from a path.
     ///
