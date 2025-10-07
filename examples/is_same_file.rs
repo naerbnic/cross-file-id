@@ -1,4 +1,4 @@
-use same_file::is_same_file;
+use cross_file_id::is_same_file;
 use std::io;
 
 fn try_main() -> Result<(), io::Error> {

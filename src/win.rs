@@ -1,3 +1,4 @@
+use io_lifetimes::raw::RawFilelike;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -55,12 +56,12 @@ enum FileIdentityContents {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct FileIdentity {
+pub struct FileId {
     file_id_info: FileIdentityContents,
 }
 
 impl FileIdentity {
-    pub fn from_os_file(f: RawOsFile) -> io::Result<FileIdentity> {
+    pub fn from_filelike(f: RawOsFile) -> io::Result<FileIdentity> {
         let file_id_info = unsafe {
             let mut info = FILE_ID_INFO::default();
             let res = GetFileInformationByHandleEx(

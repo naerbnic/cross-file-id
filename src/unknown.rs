@@ -2,30 +2,28 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+use io_lifetimes::raw::RawFilelike;
 use std::convert::Infallible as Never;
 
 static ERROR_MESSAGE: &str = "same-file is not supported on this platform.";
 
 #[derive(Debug, Clone, Copy, Eq, Hash)]
-pub struct FileIdentity(Never);
+pub struct FileId(Never);
 
-impl FileIdentity {
-    pub fn from_os_file(_f: RawOsFile) -> io::Result<FileIdentity> {
+impl FileId {
+    pub fn from_filelike(_f: RawFilelike) -> io::Result<FileId> {
         error()
     }
 }
 
-impl PartialEq for FileIdentity {
-    fn eq(&self, _other: &FileIdentity) -> bool {
+impl PartialEq for FileId {
+    fn eq(&self, _other: &FileId) -> bool {
         match self.0 {}
     }
 }
 
-impl PartialOrd for FileIdentity {
-    fn partial_cmp(
-        &self,
-        _other: &FileIdentity,
-    ) -> Option<std::cmp::Ordering> {
+impl PartialOrd for FileId {
+    fn partial_cmp(&self, _other: &FileId) -> Option<std::cmp::Ordering> {
         match self.0 {}
     }
 }
@@ -83,5 +81,3 @@ impl Handle {
 fn error<T>() -> io::Result<T> {
     Err(io::Error::new(io::ErrorKind::Other, ERROR_MESSAGE))
 }
-
-pub struct RawOsFile<'a>(Never, std::marker::PhantomData<&'a ()>);

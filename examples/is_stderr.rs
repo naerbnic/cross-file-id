@@ -1,7 +1,7 @@
 use std::io;
 use std::process;
 
-use same_file::Handle;
+use cross_file_id::Handle;
 
 fn main() {
     if let Err(err) = run() {

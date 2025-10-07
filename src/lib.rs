@@ -1,93 +1,31 @@
 /*!
-This crate provides a safe and simple **cross platform** way to determine
-whether two file paths refer to the same file or directory.
+This crate provides a safe and simple **cross platform** way to represent the
+identity of a file within a filesystem.
 
-Most uses of this crate should be limited to the top-level [`is_same_file`]
-function, which takes two file paths and returns true if they refer to the
-same file or directory:
+The fundamental type provided by this crate is [`FileId`], which is equatable,
+orderable, hashable, and copyable. This is a low-level type that can provide
+useful file identity functionality, but must follow additional rules to
+ensure that the identity remains valid.
 
-```rust,no_run
-# use std::error::Error;
-use same_file::is_same_file;
-
-# fn try_main() -> Result<(), Box<dyn Error>> {
-assert!(is_same_file("/bin/sh", "/usr/bin/sh")?);
-#    Ok(())
-# }
-#
-# fn main() {
-#    try_main().unwrap();
-# }
-```
-
-Additionally, this crate provides a [`Handle`] type that permits a more efficient
-equality check depending on your access pattern. For example, if one wanted to
-check whether any path in a list of paths corresponded to the process' stdout
-handle, then one could build a handle once for stdout. The equality check for
-each file in the list then only requires one stat call instead of two. The code
-might look like this:
-
-```rust,no_run
-# use std::error::Error;
-use same_file::Handle;
-
-# fn try_main() -> Result<(), Box<dyn Error>> {
-let candidates = &[
-    "examples/is_same_file.rs",
-    "examples/is_stderr.rs",
-    "examples/stderr",
-];
-let stdout_handle = Handle::stdout()?;
-for candidate in candidates {
-    let handle = Handle::from_path(candidate)?;
-    if stdout_handle == handle {
-        println!("{:?} is stdout!", candidate);
-    } else {
-        println!("{:?} is NOT stdout!", candidate);
-    }
-}
-#    Ok(())
-# }
-#
-# fn main() {
-#     try_main().unwrap();
-# }
-```
-
-See [`examples/is_stderr.rs`] for a runnable example and compare the output of:
-
-- `cargo run --example is_stderr 2> examples/stderr` and
-- `cargo run --example is_stderr`.
-
-[`is_same_file`]: fn.is_same_file.html
-[`Handle`]: struct.Handle.html
-[`examples/is_stderr.rs`]: https://github.com/BurntSushi/same-file/blob/master/examples/is_same_file.rs
-
+Other types are provided to provide a "safer" interface for using file identity
+which ensures that the file remains open for the lifetime of the identity.
 */
-
-#![allow(bare_trait_objects, unknown_lints)]
-#![deny(missing_docs)]
+#![warn(missing_docs)]
 
 #[cfg(doctest)]
 doc_comment::doctest!("../README.md");
 
-use std::fs::File;
-use std::io;
+use std::io::{self, Stderr, Stdout};
 use std::path::Path;
+use std::{fs::File, io::Stdin};
 
-#[cfg(unix)]
-use crate::unix as imp;
-#[cfg(not(any(unix, windows)))]
-use unknown as imp;
-#[cfg(windows)]
-use win as imp;
+use io_lifetimes::raw::{AsRawFilelike, RawFilelike};
 
-#[cfg(unix)]
-mod unix;
-#[cfg(not(any(unix, windows)))]
-mod unknown;
-#[cfg(windows)]
-mod win;
+// Import the platform-specific implementation.
+#[cfg_attr(unix, path = "unix.rs")]
+#[cfg_attr(windows, path = "win.rs")]
+#[cfg_attr(not(any(unix, windows)), path = "unknown.rs")]
+mod imp;
 
 /// A cross-platform representation of a file's identity.
 ///
@@ -100,25 +38,24 @@ mod win;
 /// This does not hold onto any system resources, so it is safe to store and
 /// copy, but if the safety of the program is dependent on the identity
 /// remaining valid, then the file must be kept open by this process.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FileIdentity(imp::FileIdentity);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileId(imp::FileId);
 
-impl FileIdentity {
+impl FileId {
     /// Extract a file identity from any type that implements the
     /// [`AsRawOsFile`] trait, and thus the platform-specific traits
     /// that provide access to raw OS representations of files.
     ///
     /// This does not take ownership of the OS file or alter its state.
-    pub fn from_file_like<F: AsRawOsFile>(file: &F) -> io::Result<Self> {
-        imp::FileIdentity::from_os_file(file.as_raw_os_file().0)
-            .map(FileIdentity)
+    pub fn from_file_like<F: AsRawFilelike>(file: &F) -> io::Result<Self> {
+        Self::from_raw(file.as_raw_filelike())
     }
 
     /// Extract a file identity from a raw OS file descriptor or handle.
     ///
     /// This does not take ownership of the OS file or alter its state.
-    pub fn from_os_file(os_file: RawOsFile<'_>) -> io::Result<Self> {
-        imp::FileIdentity::from_os_file(os_file.0).map(FileIdentity)
+    pub fn from_raw(os_file: RawFilelike) -> io::Result<Self> {
+        imp::FileId::from_filelike(os_file).map(FileId)
     }
 }
 
@@ -130,18 +67,100 @@ impl FileIdentity {
 ///
 /// A handle consumes an open file resource as long as it exists.
 ///
-/// Equality is determined by comparing inode numbers on Unix and a combination
-/// of identifier, volume serial, and file size on Windows. Note that it's
-/// possible for comparing two handles to produce a false positive on some
-/// platforms. Namely, two handles can compare equal even if the two handles
-/// *don't* point to the same file. Check the [source] for specific
-/// implementation details.
-///
-/// [source]: https://github.com/BurntSushi/same-file/tree/master/src
-#[derive(Debug, Eq, PartialEq, Hash)]
-pub struct Handle(imp::Handle);
+/// Equality is determined by comparing the platform-specific file identity
+/// associated with the handle. If created from a file-like object (via
+/// [`from_file_like`]), then the handle will ensure that the file identity
+/// remains valid for the lifetime of the handle.
+#[derive(Debug)]
+pub struct Handle<F> {
+    handle: F,
+    identity: FileId,
+}
 
-impl Handle {
+impl<F> Handle<F> {
+    /// Construct a handle from its parts.
+    ///
+    /// # Safety
+    ///
+    /// This may be unsafe as the Handle type guarantees that the identity
+    /// gives a true representation of the file referred to by the handle.
+    /// This is only the case while the file itself stays open, so the caller
+    /// must ensure that the value of type F ensures that the file remains
+    /// open for the lifetime of the Handle.
+    pub unsafe fn from_parts(handle: F, identity: FileId) -> Self {
+        Handle { handle, identity }
+    }
+
+    /// Consume the handle and return the underlying file-like object.
+    ///
+    /// This is provided as an associated function instead of a method
+    /// to ensure that operations that rely on the value being accessible via
+    /// dereference aren't accidentally masked.
+    pub fn into_inner(this: Self) -> F {
+        this.handle
+    }
+
+    /// Get the file identity for this handle.
+    ///
+    /// This is provided as an associated function instead of a method
+    /// to ensure that operations that rely on the value being accessible via
+    /// dereference aren't accidentally masked.
+    pub fn id(this: Self) -> FileId {
+        this.identity.clone()
+    }
+}
+
+impl<F> Handle<F>
+where
+    F: AsRawFilelike,
+{
+    /// Construct a handle from any type that implements the platform-specific
+    /// traits that provide access to raw OS representations of files.
+    ///
+    /// The resulting handle will act as a wrapper around the given file-like
+    /// object, and will ensure that the file remains open for the lifetime of
+    /// the handle.
+    pub fn from_file_like(file: F) -> io::Result<Self> {
+        let file_id = FileId::from_file_like(&file)?;
+        Ok(Handle { handle: file, identity: file_id })
+    }
+}
+
+impl<F> std::ops::Deref for Handle<F> {
+    type Target = F;
+
+    fn deref(&self) -> &F {
+        &self.handle
+    }
+}
+
+impl<F> std::ops::DerefMut for Handle<F> {
+    fn deref_mut(&mut self) -> &mut F {
+        &mut self.handle
+    }
+}
+
+impl<F1, F2> std::cmp::PartialEq<Handle<F2>> for Handle<F1> {
+    fn eq(&self, other: &Handle<F2>) -> bool {
+        self.identity == other.identity
+    }
+}
+
+impl<F> std::cmp::Eq for Handle<F> {}
+
+impl<F1, F2> std::cmp::PartialOrd<Handle<F2>> for Handle<F1> {
+    fn partial_cmp(&self, other: &Handle<F2>) -> Option<std::cmp::Ordering> {
+        self.identity.partial_cmp(&other.identity)
+    }
+}
+
+impl<F> std::cmp::Ord for Handle<F> {
+    fn cmp(&self, other: &Handle<F>) -> std::cmp::Ordering {
+        self.identity.cmp(&other.identity)
+    }
+}
+
+impl Handle<File> {
     /// Construct a handle from a path.
     ///
     /// Note that the underlying [`File`] is opened in read-only mode on all
@@ -162,7 +181,7 @@ impl Handle {
     ///
     /// ```rust,no_run
     /// # use std::error::Error;
-    /// use same_file::Handle;
+    /// use cross_file_id::Handle;
     ///
     /// # fn try_main() -> Result<(), Box<dyn Error>> {
     /// let source = Handle::from_path("./source")?;
@@ -175,8 +194,9 @@ impl Handle {
     /// #     try_main().unwrap();
     /// # }
     /// ```
-    pub fn from_path<P: AsRef<Path>>(p: P) -> io::Result<Handle> {
-        imp::Handle::from_path(p).map(Handle)
+    pub fn from_path<P: AsRef<Path>>(p: P) -> io::Result<Self> {
+        let file = std::fs::File::open(p)?;
+        Self::from_file_like(file)
     }
 
     /// Construct a handle from a file.
@@ -194,7 +214,7 @@ impl Handle {
     /// ```rust,no_run
     /// # use std::error::Error;
     /// # use std::fs::File;
-    /// use same_file::Handle;
+    /// use cross_file_id::Handle;
     ///
     /// # fn try_main() -> Result<(), Box<dyn Error>> {
     /// let source = File::open("./source")?;
@@ -212,10 +232,12 @@ impl Handle {
     /// #     try_main().unwrap();
     /// # }
     /// ```
-    pub fn from_file(file: File) -> io::Result<Handle> {
-        imp::Handle::from_file(file).map(Handle)
+    pub fn from_file(file: File) -> io::Result<Self> {
+        Self::from_file_like(file)
     }
+}
 
+impl Handle<Stdin> {
     /// Construct a handle from stdin.
     ///
     /// # Errors
@@ -228,7 +250,7 @@ impl Handle {
     ///
     /// ```rust
     /// # use std::error::Error;
-    /// use same_file::Handle;
+    /// use cross_file_id::Handle;
     ///
     /// # fn try_main() -> Result<(), Box<dyn Error>> {
     /// let stdin = Handle::stdin()?;
@@ -278,10 +300,12 @@ impl Handle {
     /// > type result
     /// stdout == stderr
     /// ```
-    pub fn stdin() -> io::Result<Handle> {
-        imp::Handle::stdin().map(Handle)
+    pub fn stdin() -> io::Result<Handle<Stdin>> {
+        Self::from_file_like(std::io::stdin())
     }
+}
 
+impl Handle<Stdout> {
     /// Construct a handle from stdout.
     ///
     /// # Errors
@@ -294,10 +318,12 @@ impl Handle {
     /// See the example for [`stdin()`].
     ///
     /// [`stdin()`]: #method.stdin
-    pub fn stdout() -> io::Result<Handle> {
-        imp::Handle::stdout().map(Handle)
+    pub fn stdout() -> io::Result<Self> {
+        Self::from_file_like(std::io::stdout())
     }
+}
 
+impl Handle<Stderr> {
     /// Construct a handle from stderr.
     ///
     /// # Errors
@@ -310,165 +336,9 @@ impl Handle {
     /// See the example for [`stdin()`].
     ///
     /// [`stdin()`]: #method.stdin
-    pub fn stderr() -> io::Result<Handle> {
-        imp::Handle::stderr().map(Handle)
+    pub fn stderr() -> io::Result<Self> {
+        Self::from_file_like(std::io::stderr())
     }
-
-    /// Return a reference to the underlying file.
-    ///
-    /// # Examples
-    /// Ensure that the target file is not the same as the source one,
-    /// and copy the data to it:
-    ///
-    /// ```rust,no_run
-    /// # use std::error::Error;
-    /// use std::io::prelude::*;
-    /// use std::io::Write;
-    /// use std::fs::File;
-    /// use same_file::Handle;
-    ///
-    /// # fn try_main() -> Result<(), Box<dyn Error>> {
-    /// let source = File::open("source")?;
-    /// let target = File::create("target")?;
-    ///
-    /// let source_handle = Handle::from_file(source)?;
-    /// let mut target_handle = Handle::from_file(target)?;
-    /// assert_ne!(source_handle, target_handle, "The files are the same.");
-    ///
-    /// let mut source = source_handle.as_file();
-    /// let target = target_handle.as_file_mut();
-    ///
-    /// let mut buffer = Vec::new();
-    /// // data copy is simplified for the purposes of the example
-    /// source.read_to_end(&mut buffer)?;
-    /// target.write_all(&buffer)?;
-    /// #
-    /// #    Ok(())
-    /// # }
-    /// #
-    /// # fn main() {
-    /// #    try_main().unwrap();
-    /// # }
-    /// ```
-    pub fn as_file(&self) -> &File {
-        self.0.as_file()
-    }
-
-    /// Return a mutable reference to the underlying file.
-    ///
-    /// # Examples
-    /// See the example for [`as_file()`].
-    ///
-    /// [`as_file()`]: #method.as_file
-    pub fn as_file_mut(&mut self) -> &mut File {
-        self.0.as_file_mut()
-    }
-
-    /// Returns the underlying file identity of this handle.
-    pub fn id(&self) -> FileIdentity {
-        FileIdentity(self.0.id())
-    }
-
-    /// Return the underlying device number of this handle.
-    ///
-    /// Note that this only works on unix platforms.
-    #[cfg(unix)]
-    pub fn dev(&self) -> u64 {
-        self.0.dev()
-    }
-
-    /// Return the underlying inode number of this handle.
-    ///
-    /// Note that this only works on unix platforms.
-    #[cfg(unix)]
-    pub fn ino(&self) -> u64 {
-        self.0.ino()
-    }
-}
-
-#[derive(Debug)]
-struct Handle2<F> {
-    file: F,
-    id: FileIdentity,
-}
-
-impl Handle2<File> {
-    pub fn from_path<P: AsRef<Path>>(p: P) -> io::Result<Handle2<File>> {
-        let file = File::open(p)?;
-        Handle2::new(file)
-    }
-
-    pub fn from_file(file: File) -> io::Result<Handle2<File>> {
-        Handle2::new(file)
-    }
-}
-
-impl<F> Handle2<F>
-where
-    F: AsRawOsFile,
-{
-    pub fn new(file: F) -> io::Result<Handle2<F>> {
-        let id = FileIdentity::from_file_like(&file)?;
-        Ok(Handle2 { file, id })
-    }
-
-    pub fn into_inner(self) -> F {
-        self.file
-    }
-
-    pub fn id(&self) -> FileIdentity {
-        self.id
-    }
-}
-
-impl<F> std::ops::Deref for Handle2<F> {
-    type Target = F;
-
-    fn deref(&self) -> &F {
-        &self.file
-    }
-}
-
-impl<F> std::ops::DerefMut for Handle2<F> {
-    fn deref_mut(&mut self) -> &mut F {
-        &mut self.file
-    }
-}
-
-impl<F> PartialEq for Handle2<F> {
-    fn eq(&self, other: &Handle2<F>) -> bool {
-        self.id == other.id
-    }
-}
-
-impl<F> Eq for Handle2<F> {}
-
-impl<F> PartialOrd for Handle2<F> {
-    fn partial_cmp(&self, other: &Handle2<F>) -> Option<std::cmp::Ordering> {
-        self.id.partial_cmp(&other.id)
-    }
-}
-
-impl<F> std::hash::Hash for Handle2<F> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state);
-    }
-}
-
-/// A cross-platform wrapper around a platform specific file descriptor or
-/// handle.
-///
-/// This can be used to extract a [`FileIdentity`] from any type that
-/// implements the [`AsRawOsFile`] trait, which must include std::fs::File.
-pub struct RawOsFile<'a>(imp::RawOsFile<'a>);
-
-/// A cross-platform trait for extracting a raw file descriptor or handle.
-///
-/// Maps to the platform specific traits [`AsRawFd`] on Unix and
-/// [`AsRawHandle`] on Windows via a blanket implementation.
-pub trait AsRawOsFile {
-    /// Extracts the raw file descriptor or handle.
-    fn as_raw_os_file(&self) -> RawOsFile<'_>;
 }
 
 /// Returns true if the two file paths may correspond to the same file.
@@ -486,7 +356,7 @@ pub trait AsRawOsFile {
 /// # Example
 ///
 /// ```rust,no_run
-/// use same_file::is_same_file;
+/// use cross_file_id::is_same_file;
 ///
 /// assert!(is_same_file("./foo", "././foo").unwrap_or(false));
 /// ```
@@ -684,12 +554,12 @@ mod tests {
     #[test]
     fn test_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<super::Handle>();
+        assert_send::<super::Handle<File>>();
     }
 
     #[test]
     fn test_sync() {
         fn assert_sync<T: Sync>() {}
-        assert_sync::<super::Handle>();
+        assert_sync::<super::Handle<File>>();
     }
 }

@@ -1,49 +1,53 @@
-same-file
-=========
-A safe and cross platform crate to determine whether two files or directories
-are the same.
+# `cross-file-id`
 
-[![Build status](https://github.com/BurntSushi/same-file/workflows/ci/badge.svg)](https://github.com/BurntSushi/same-file/actions)
-[![](http://meritbadge.herokuapp.com/same-file)](https://crates.io/crates/same-file)
+This crate provides primitives for working with cross-platform file identity,
+with a focus on the identities of currently open files.
 
-Dual-licensed under MIT or the [UNLICENSE](http://unlicense.org).
+Most operating systems have some way of distinguishing different files
+on the filesystem from each other. It can be important to know if two file
+objects are the same in order to prevent Time-of-Check/Time-of-Use errors
+or vulnerabilities.
 
-### Documentation
+This library provides a high-level and low-level API. The low-level API provides
+the `FileId` type which represents a cross-platform file identity value that is
+cheap to clone, and can be used as a key in ordered or hashed contexts. While it
+can provide reliable file identity, it only works as long as the file exists,
+which generally means you can only be certain of it while the file is kept
+open by the program.
 
-https://docs.rs/same-file
+The high-level API is a `Handle` which ensures that the file whose identity
+it contains will be kept open. As such, it can be guaranteed that its value is
+stable and represents true file identity as long as the underlying file does
+not change while the value is kept.
 
-### Usage
-
-Add this to your `Cargo.toml`:
-
-```toml
-[dependencies]
-same-file = "1"
-```
-
-### Example
-
-The simplest use of this crate is to use the `is_same_file` function, which
-takes two file paths and returns true if and only if they refer to the same
-file:
+Example:
 
 ```rust,no_run
-use same_file::is_same_file;
+use cross_file_id::FileId;
 
-fn main() {
-    assert!(is_same_file("/bin/sh", "/usr/bin/sh").unwrap());
-}
+let path = "/tmp/test/path.txt";
+
+let file1 = std::fs::File::create(path)?;
+let file2 = std::fs::File::create(path)?;
+
+let file_id1 = FileId::from_file_like(&file1)?;
+let file_id2 = FileId::from_file_like(&file2)?;
+assert!(file_id1 == file_id2);
+# Ok::<_, std::io::Error>(())
 ```
 
-### Minimum Rust version policy
+## Related Crates
 
-This crate's minimum supported `rustc` version is `1.60.0`.
+### `same-file`
 
-The current policy is that the minimum Rust version required to use this crate
-can be increased in minor version updates. For example, if `crate 1.0` requires
-Rust 1.20.0, then `crate 1.0.z` for all values of `z` will also require Rust
-1.20.0 or newer. However, `crate 1.y` for `y > 0` may require a newer minimum
-version of Rust.
+Much of this code is derived from the `same-file` crate by BurntSushi. This
+crate has a slightly different focus from that one, although some of the API is
+similar. In particular, the `FileId` type is a separate cheap to clone type that
+provides a comparable file ID, but requires some care to use correctly.
 
-In general, this crate will be conservative with respect to the minimum
-supported version of Rust.
+### `file-id`
+
+This crate does provide a `FileId` type, but the type makes all of the platform
+specific fields part of its public interface, making it hard to add new API
+representations or other necessary changes. In addition it only works on paths,
+not file descriptors/handles.
