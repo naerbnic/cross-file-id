@@ -193,7 +193,7 @@ impl Handle<File> {
     /// # }
     /// ```
     pub fn from_path<P: AsRef<Path>>(p: P) -> io::Result<Self> {
-        // Because this is intended to work as either a file OR directory, we have to 
+        // Because this is intended to work as either a file OR directory, we have to
         // delegate this to the implementation to open it.
         let file = imp::open_file(p.as_ref())?;
         Self::from_file_like(file)
@@ -423,7 +423,7 @@ mod tests {
             #![allow(deprecated)]
 
             use std::sync::atomic::{
-                AtomicUsize, Ordering, ATOMIC_USIZE_INIT,
+                ATOMIC_USIZE_INIT, AtomicUsize, Ordering,
             };
 
             static TRIES: usize = 100;
