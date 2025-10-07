@@ -339,6 +339,20 @@ impl Handle<Stderr> {
     }
 }
 
+/// Returns true if the two file-like objects refer to the same file.
+///
+/// This works for any types that implement the platform-specific traits
+/// that provide access to raw OS representations of files.
+pub fn is_same_file<F1, F2>(h1: &F1, h2: &F2) -> io::Result<bool>
+where
+    F1: AsRawFilelike,
+    F2: AsRawFilelike,
+{
+    let id1 = FileId::from_file_like(h1)?;
+    let id2 = FileId::from_file_like(h2)?;
+    Ok(id1 == id2)
+}
+
 /// Returns true if the two file paths may correspond to the same file.
 ///
 /// Note that it's possible for this to produce a false positive on some
@@ -354,11 +368,11 @@ impl Handle<Stderr> {
 /// # Example
 ///
 /// ```rust,no_run
-/// use cross_file_id::is_same_file;
+/// use cross_file_id::is_same_file_path;
 ///
-/// assert!(is_same_file("./foo", "././foo").unwrap_or(false));
+/// assert!(is_same_file_path("./foo", "././foo").unwrap_or(false));
 /// ```
-pub fn is_same_file<P, Q>(path1: P, path2: Q) -> io::Result<bool>
+pub fn is_same_file_path<P, Q>(path1: P, path2: Q) -> io::Result<bool>
 where
     P: AsRef<Path>,
     Q: AsRef<Path>,
@@ -375,7 +389,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::result;
 
-    use super::is_same_file;
+    use super::is_same_file_path;
 
     type Result<T> = result::Result<T, Box<dyn error::Error + Send + Sync>>;
 
@@ -487,7 +501,7 @@ mod tests {
         let dir = tdir.path();
 
         File::create(dir.join("a")).unwrap();
-        assert!(is_same_file(dir.join("a"), dir.join("a")).unwrap());
+        assert!(is_same_file_path(dir.join("a"), dir.join("a")).unwrap());
     }
 
     #[test]
@@ -496,7 +510,7 @@ mod tests {
         let dir = tdir.path();
 
         fs::create_dir(dir.join("a")).unwrap();
-        assert!(is_same_file(dir.join("a"), dir.join("a")).unwrap());
+        assert!(is_same_file_path(dir.join("a"), dir.join("a")).unwrap());
     }
 
     #[test]
@@ -506,7 +520,7 @@ mod tests {
 
         File::create(dir.join("a")).unwrap();
         File::create(dir.join("b")).unwrap();
-        assert!(!is_same_file(dir.join("a"), dir.join("b")).unwrap());
+        assert!(!is_same_file_path(dir.join("a"), dir.join("b")).unwrap());
     }
 
     #[test]
@@ -516,7 +530,7 @@ mod tests {
 
         fs::create_dir(dir.join("a")).unwrap();
         fs::create_dir(dir.join("b")).unwrap();
-        assert!(!is_same_file(dir.join("a"), dir.join("b")).unwrap());
+        assert!(!is_same_file_path(dir.join("a"), dir.join("b")).unwrap());
     }
 
     #[test]
@@ -526,7 +540,7 @@ mod tests {
 
         File::create(dir.join("a")).unwrap();
         fs::hard_link(dir.join("a"), dir.join("alink")).unwrap();
-        assert!(is_same_file(dir.join("a"), dir.join("alink")).unwrap());
+        assert!(is_same_file_path(dir.join("a"), dir.join("alink")).unwrap());
     }
 
     #[test]
@@ -536,7 +550,7 @@ mod tests {
 
         File::create(dir.join("a")).unwrap();
         soft_link_file(dir.join("a"), dir.join("alink")).unwrap();
-        assert!(is_same_file(dir.join("a"), dir.join("alink")).unwrap());
+        assert!(is_same_file_path(dir.join("a"), dir.join("alink")).unwrap());
     }
 
     #[test]
@@ -546,7 +560,7 @@ mod tests {
 
         fs::create_dir(dir.join("a")).unwrap();
         soft_link_dir(dir.join("a"), dir.join("alink")).unwrap();
-        assert!(is_same_file(dir.join("a"), dir.join("alink")).unwrap());
+        assert!(is_same_file_path(dir.join("a"), dir.join("alink")).unwrap());
     }
 
     #[test]
