@@ -3,9 +3,7 @@ on:
   pull_request:
   push:
     branches:
-    - master
-  schedule:
-  - cron: '00 01 * * *'
+    - main
 jobs:
   test:
     name: test
@@ -13,8 +11,6 @@ jobs:
     strategy:
       matrix:
         build:
-        - pinned
-        - pinned-win
         - stable
         - beta
         - nightly
@@ -22,12 +18,6 @@ jobs:
         - win-msvc
         - win-gnu
         include:
-        - build: pinned
-          os: ubuntu-latest
-          rust: 1.60.0
-        - build: pinned-win
-          os: windows-latest
-          rust: 1.60.0
         - build: stable
           os: ubuntu-latest
           rust: stable
