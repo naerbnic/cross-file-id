@@ -1,12 +1,16 @@
-use io_lifetimes::raw::RawFilelike;
-use std::fs::File;
+use io_lifetimes::raw::{FromRawFilelike, RawFilelike};
 use std::hash::{Hash, Hasher};
 use std::io;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, IntoRawHandle, RawHandle};
 use std::path::Path;
+use windows::Win32::Foundation::GENERIC_READ;
+use windows::core::PCWSTR;
 
 use windows::Win32::Storage::FileSystem::{
-    FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_128, FILE_ID_INFO,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+    FileIdInfo, GetFileInformationByHandleEx, GetFileType, OPEN_EXISTING,
 };
 
 // For correctness, it is critical that both file handles remain open while
@@ -50,180 +54,104 @@ use windows::Win32::Storage::FileSystem::{
 // into the offending directory. As far as failure modes goes, this isn't
 // that bad.
 
-enum FileIdentityContents {
-    FileIdInfo(FILE_ID_INFO),
-    RawHandle(RawHandle),
+fn compare_file_id_128(a: FILE_ID_128, b: FILE_ID_128) -> std::cmp::Ordering {
+    a.Identifier.cmp(&b.Identifier)
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FileId {
-    file_id_info: FileIdentityContents,
+    file_id_info: FILE_ID_INFO,
 }
 
-impl FileIdentity {
-    pub fn from_filelike(f: RawOsFile) -> io::Result<FileIdentity> {
+impl Eq for FileId {}
+
+impl PartialOrd for FileId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FileId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.file_id_info
+            .VolumeSerialNumber
+            .cmp(&other.file_id_info.VolumeSerialNumber)
+            .then_with(|| {
+                compare_file_id_128(
+                    self.file_id_info.FileId,
+                    other.file_id_info.FileId,
+                )
+            })
+    }
+}
+
+impl Hash for FileId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.file_id_info.VolumeSerialNumber);
+        state.write(&self.file_id_info.FileId.Identifier);
+    }
+}
+
+impl FileId {
+    pub fn from_filelike(f: RawFilelike) -> io::Result<FileId> {
         let file_id_info = unsafe {
-            let mut info = FILE_ID_INFO::default();
-            let res = GetFileInformationByHandleEx(
-                f.0,
-                FileIdInfo,
-                &mut info as *mut _,
-                std::mem::size_of::<FILE_ID_INFO>() as u32,
-            );
-            if res.as_bool() == false {
-                // We weren't able to get FILE_ID_INFO, so fall back to using
-                // the raw handle. This fits the documented behavior of
-                // returning a non-None FileIdentity on success, even if
-                return Err(io::Error::last_os_error());
+            let handle = windows::Win32::Foundation::HANDLE(f);
+            let file_type = GetFileType(handle);
+            if file_type != FILE_TYPE_DISK {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Unable to get information about handle of type {:?}",
+                        file_type
+                    ),
+                ));
             }
+            let mut info = FILE_ID_INFO::default();
+            GetFileInformationByHandleEx(
+                handle,
+                FileIdInfo,
+                &mut info as *mut FILE_ID_INFO as *mut _,
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )?;
             info
         };
 
-        Ok(FileIdentity { file_id_info })
-    }
-
-    pub fn volume(&self) -> u64 {
-        self.volume
-    }
-
-    pub fn index(&self) -> u64 {
-        self.index
+        Ok(FileId { file_id_info })
     }
 }
 
-#[derive(Debug)]
-pub struct Handle {
-    kind: HandleKind,
-    key: Option<FileIdentity>,
-}
-
-#[derive(Debug)]
-enum HandleKind {
-    /// Used when opening a file or acquiring ownership of a file.
-    Owned(winutil::Handle),
-    /// Used for stdio.
-    Borrowed(winutil::HandleRef),
-}
-
-impl Eq for Handle {}
-
-impl PartialEq for Handle {
-    fn eq(&self, other: &Handle) -> bool {
-        // Need this branch to satisfy `Eq` since `Handle`s with
-        // `key.is_none()` wouldn't otherwise.
-        if self as *const Handle == other as *const Handle {
-            return true;
-        } else if self.key.is_none() || other.key.is_none() {
-            return false;
-        }
-        self.key == other.key
-    }
-}
-
-impl AsRawHandle for crate::Handle {
-    fn as_raw_handle(&self) -> RawHandle {
-        match self.0.kind {
-            HandleKind::Owned(ref h) => h.as_raw_handle(),
-            HandleKind::Borrowed(ref h) => h.as_raw_handle(),
-        }
-    }
-}
-
-impl IntoRawHandle for crate::Handle {
-    fn into_raw_handle(self) -> RawHandle {
-        match self.0.kind {
-            HandleKind::Owned(h) => h.into_raw_handle(),
-            HandleKind::Borrowed(h) => h.as_raw_handle(),
-        }
-    }
-}
-
-impl Hash for Handle {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.key.hash(state);
-    }
-}
-
-impl Handle {
-    pub fn from_path<P: AsRef<Path>>(p: P) -> io::Result<Handle> {
-        let h = winutil::Handle::from_path_any(p)?;
-        let info = winutil::file::information(&h)?;
-        Ok(Handle::from_info(HandleKind::Owned(h), info))
-    }
-
-    pub fn from_file(file: File) -> io::Result<Handle> {
-        let h = winutil::Handle::from_file(file);
-        let info = winutil::file::information(&h)?;
-        Ok(Handle::from_info(HandleKind::Owned(h), info))
-    }
-
-    fn from_std_handle(h: winutil::HandleRef) -> io::Result<Handle> {
-        match winutil::file::information(&h) {
-            Ok(info) => Ok(Handle::from_info(HandleKind::Borrowed(h), info)),
-            // In a Windows console, if there is no pipe attached to a STD
-            // handle, then GetFileInformationByHandle will return an error.
-            // We don't really care. The only thing we care about is that
-            // this handle is never equivalent to any other handle, which is
-            // accomplished by setting key to None.
-            Err(_) => Ok(Handle { kind: HandleKind::Borrowed(h), key: None }),
-        }
-    }
-
-    fn from_info(
-        kind: HandleKind,
-        info: winutil::file::Information,
-    ) -> Handle {
-        Handle {
-            kind: kind,
-            key: Some(FileIdentity {
-                volume: info.volume_serial_number(),
-                index: info.file_index(),
-            }),
-        }
-    }
-
-    pub fn stdin() -> io::Result<Handle> {
-        Handle::from_std_handle(winutil::HandleRef::stdin())
-    }
-
-    pub fn stdout() -> io::Result<Handle> {
-        Handle::from_std_handle(winutil::HandleRef::stdout())
-    }
-
-    pub fn stderr() -> io::Result<Handle> {
-        Handle::from_std_handle(winutil::HandleRef::stderr())
-    }
-
-    pub fn as_file(&self) -> &File {
-        match self.kind {
-            HandleKind::Owned(ref h) => h.as_file(),
-            HandleKind::Borrowed(ref h) => h.as_file(),
-        }
-    }
-
-    pub fn as_file_mut(&mut self) -> &mut File {
-        match self.kind {
-            HandleKind::Owned(ref mut h) => h.as_file_mut(),
-            HandleKind::Borrowed(ref mut h) => h.as_file_mut(),
-        }
-    }
-}
-
-/// A blanket implementation of AsRawOsFile for any types that implement
-/// AsRawFd.
-impl<T> AsRawOsFile for T
+impl<F> AsRawHandle for crate::Handle<F>
 where
-    T: AsRawHandle,
+    F: AsRawHandle,
 {
-    fn as_raw_os_file(&self) -> crate::RawOsFile<'_> {
-        crate::RawOsFile(RawOsFile(
-            self.as_raw_handle(),
-            std::marker::PhantomData,
-        ))
+    fn as_raw_handle(&self) -> RawHandle {
+        self.handle.as_raw_handle()
     }
 }
 
-pub struct RawOsFile<'a>(
-    std::os::windows::io::RawHandle,
-    std::marker::PhantomData<&'a ()>,
-);
+impl<F> IntoRawHandle for crate::Handle<F>
+where
+    F: IntoRawHandle,
+{
+    fn into_raw_handle(self) -> RawHandle {
+        self.handle.into_raw_handle()
+    }
+}
+
+pub fn open_file(path: &Path) -> io::Result<std::fs::File> {
+    let wide_path: Vec<_> =
+        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let file = unsafe {
+        let handle = CreateFileW(
+            PCWSTR::from_raw(wide_path.as_ptr()),
+            GENERIC_READ.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )?;
+        std::fs::File::from_raw_filelike(handle.0)
+    };
+    Ok(file)
+}

@@ -193,7 +193,9 @@ impl Handle<File> {
     /// # }
     /// ```
     pub fn from_path<P: AsRef<Path>>(p: P) -> io::Result<Self> {
-        let file = std::fs::File::open(p)?;
+        // Because this is intended to work as either a file OR directory, we have to 
+        // delegate this to the implementation to open it.
+        let file = imp::open_file(p.as_ref())?;
         Self::from_file_like(file)
     }
 
@@ -246,7 +248,7 @@ impl Handle<Stdin> {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// # use std::error::Error;
     /// use cross_file_id::Handle;
     ///
