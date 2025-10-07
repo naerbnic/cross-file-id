@@ -1,15 +1,13 @@
-/*!
-This crate provides a safe and simple **cross platform** way to represent the
-identity of a file within a filesystem.
-
-The fundamental type provided by this crate is [`FileId`], which is equatable,
-orderable, hashable, and copyable. This is a low-level type that can provide
-useful file identity functionality, but must follow additional rules to
-ensure that the identity remains valid.
-
-Other types are provided to provide a "safer" interface for using file identity
-which ensures that the file remains open for the lifetime of the identity.
-*/
+//! This crate provides a safe and simple **cross platform** way to represent the
+//! identity of a file within a filesystem.
+//!
+//! The fundamental type provided by this crate is [`FileId`], which is equatable,
+//! orderable, hashable, and copyable. This is a low-level type that can provide
+//! useful file identity functionality, but must follow additional rules to
+//! ensure that the identity remains valid.
+//!
+//! Other types are provided to provide a "safer" interface for using file identity
+//! which ensures that the file remains open for the lifetime of the identity.
 #![warn(missing_docs)]
 
 #[cfg(doctest)]
