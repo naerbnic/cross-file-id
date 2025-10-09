@@ -103,7 +103,7 @@ impl<F> Handle<F> {
     /// This is provided as an associated function instead of a method
     /// to ensure that operations that rely on the value being accessible via
     /// dereference aren't accidentally masked.
-    pub fn id(this: Self) -> FileId {
+    pub fn id(this: &Self) -> FileId {
         this.identity.clone()
     }
 }
