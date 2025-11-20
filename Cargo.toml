@@ -1,6 +1,6 @@
 [package]
 name = "cross-file-id"
-version = "1.0.6"  #:version
+version = "1.0.7"  #:version
 authors = ["Brian Chin", "Andrew Gallant <jamslam@gmail.com>"]
 description = """
 A crate to work with cross-platform file identity.
